@@ -1,0 +1,137 @@
+name: Release
+
+# Publishes a VPM release on a v*.*.* tag.
+#
+# Flow:
+#   1. Tag v1.2.3 on main.
+#   2. This workflow runs, verifies package.json.version == "1.2.3", zips
+#      the package directory, computes SHA256, and creates a GitHub Release
+#      with the zip and package.json attached.
+#   3. The VPM listing repo (aurorakai.github.io/vpm) pulls the release
+#      asset and SHA256 to update its index.json. That's a separate repo.
+#
+# Bumping the version:
+#   - Edit Packages/com.aurorakai.hidden-mesh-remover/package.json "version".
+#   - Commit.
+#   - git tag v1.2.3 && git push --tags
+#
+# Manual trigger is available from the Actions tab (re-release a tag, etc.).
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0) - must already exist'
+        required: true
+
+env:
+  packageName: com.aurorakai.hidden-mesh-remover
+  packagePath: Packages/com.aurorakai.hidden-mesh-remover
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VPM_DISPATCH_TOKEN: ${{ secrets.VPM_DISPATCH_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # workflow_dispatch checks out default branch; fetch the tag ref if provided.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          # SemVer pre-release versions contain a hyphen in the identifier
+          # (e.g. 1.0.0-beta.1). Treat those as GitHub pre-releases so they
+          # don't occupy the repo's "Latest release" slot.
+          if [[ "$VERSION" == *-* ]]; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Tag:        $TAG"
+          echo "Version:    $VERSION"
+          echo "Prerelease: $PRERELEASE"
+
+      - name: Verify package.json version matches tag
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(jq -r .version "${{ env.packagePath }}/package.json")
+          if [ "$PACKAGE_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::package.json version ($PACKAGE_VERSION) does not match tag (${{ steps.version.outputs.version }}). Update package.json and retag."
+            exit 1
+          fi
+          echo "package.json version matches tag: $PACKAGE_VERSION"
+
+      - name: Zip package
+        id: zip
+        shell: bash
+        run: |
+          ZIP_NAME="${{ env.packageName }}-${{ steps.version.outputs.version }}.zip"
+          # -r recursive, exclude backup/system files. Zip from inside the package
+          # directory so the archive has no Packages/... prefix - VCC expects the
+          # package.json at the zip root.
+          (cd "${{ env.packagePath }}" && zip -r "$GITHUB_WORKSPACE/$ZIP_NAME" . -x "*.meta.bak" -x ".DS_Store")
+          ls -la "$GITHUB_WORKSPACE/$ZIP_NAME"
+          echo "zipPath=$GITHUB_WORKSPACE/$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "zipName=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Compute SHA256
+        id: sha
+        shell: bash
+        run: |
+          HASH=$(sha256sum "${{ steps.zip.outputs.zipPath }}" | cut -d' ' -f1)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "SHA256: $HASH"
+          # Write alongside the zip for upload as a release asset.
+          echo "$HASH  ${{ steps.zip.outputs.zipName }}" > "${{ steps.zip.outputs.zipPath }}.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            ${{ steps.zip.outputs.zipPath }}
+            ${{ steps.zip.outputs.zipPath }}.sha256
+            ${{ env.packagePath }}/package.json
+
+      - name: Notify VPM listing to rebuild
+        # Fires repository_dispatch at aurorakai/vpm with event_type
+        # "hidden-mesh-remover-released" so the listing rebuilds its index.json
+        # immediately instead of waiting for the next scheduled run.
+        #
+        # Requires the VPM_DISPATCH_TOKEN secret on this repo: a PAT
+        # (fine-grained) scoped to aurorakai/vpm with `contents: write`.
+        # If the secret is absent the step is skipped silently - useful
+        # during initial setup or if the listing is maintained manually.
+        if: ${{ env.VPM_DISPATCH_TOKEN != '' }}
+        run: |
+          curl -fsSL \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $VPM_DISPATCH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/aurorakai/vpm/dispatches \
+            -d '{"event_type":"hidden-mesh-remover-released","client_payload":{"version":"${{ steps.version.outputs.version }}","tag":"${{ steps.version.outputs.tag }}","zipUrl":"https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/${{ env.packageName }}-${{ steps.version.outputs.version }}.zip","zipSha256Url":"https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/${{ env.packageName }}-${{ steps.version.outputs.version }}.zip.sha256"}}'
+          echo "Dispatched hidden-mesh-remover-released to aurorakai/vpm"

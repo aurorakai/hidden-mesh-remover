@@ -1,0 +1,14 @@
+{
+  "name": "com.aurorakai.hidden-mesh-remover",
+  "displayName": "Hidden Mesh Remover",
+  "version": "1.0.0",
+  "type": "avatar",
+  "unity": "2022.3",
+  "description": "Removes mesh hidden by \"hide\" blendshapes (Hide*, *-off, ...) from your avatar at upload, along with the vertices left unused. Your scene and mesh assets are not changed.",
+  "author": { "name": "Kai" },
+  "url": "https://github.com/aurorakai/hidden-mesh-remover",
+  "licensesUrl": "https://github.com/aurorakai/hidden-mesh-remover/blob/main/Packages/com.aurorakai.hidden-mesh-remover/LICENSE.md",
+  "vpmDependencies": {
+    "com.vrchat.avatars": ">=3.5.0"
+  }
+}
